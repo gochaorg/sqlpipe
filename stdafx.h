@@ -13,6 +13,8 @@
 // TODO: reference additional headers your program requires here
 #include <io.h>
 #include <fcntl.h>
+#include <atlstr.h>  // using CString
+#include <iostream> // usting c
 
 // import ADODB
 #import "C:\Program Files (x86)\Common Files\System\ado\msado15.dll" no_namespace rename("EOF", "EndOfFile")

@@ -9,6 +9,8 @@
 #include "vdi/vdierror.h"   // error constants
 #include "vdi/vdiguid.h"    // define the interface identifiers.
 
+using namespace std;
+
 // Globals
 TCHAR* _serverInstanceName;
 bool _optionQuiet = false;
@@ -47,6 +49,7 @@ _bstr_t errorMessage(DWORD messageId)
 	return retval;
 }
 
+#pragma region Выполнение SQL запроса
 // Execute the given SQL against _serverInstanceName
 DWORD executeSql(TCHAR* sql)
 {
@@ -107,7 +110,6 @@ DWORD executeSql(TCHAR* sql)
 	return 0;
 }
 
-
 _RecordsetPtr executeRecordset(TCHAR* sql)
 {
 	HRESULT hr;
@@ -161,8 +163,9 @@ _RecordsetPtr executeRecordset(TCHAR* sql)
 
 	return NULL;
 }
+#pragma endregion
 
-
+#pragma region Монтирование устройства и передача резервной копии
 // Transfer data from virtualDevice to backupfile or vice-versa
 HRESULT performTransfer(IClientVirtualDevice* virtualDevice, FILE* backupfile)
 {
@@ -245,8 +248,7 @@ HRESULT performTransfer(IClientVirtualDevice* virtualDevice, FILE* backupfile)
 
 	return NOERROR;
 }
-
-int mountAndTransferVirtualDevice(TCHAR *command, HRESULT &hr, TCHAR virtualDeviceName[39], TCHAR *sql, FILE *backupFile)
+int mountAndTransferVirtualDevice(/*TCHAR *command, */ HRESULT &hr, TCHAR virtualDeviceName[39], const TCHAR *sql, FILE *backupFile)
 {
     // Create Device Set
     IClientVirtualDeviceSet2 * virtualDeviceSet;
@@ -289,13 +291,13 @@ int mountAndTransferVirtualDevice(TCHAR *command, HRESULT &hr, TCHAR virtualDevi
 
     // Invoke backup on separate thread because virtualDeviceSet->GetConfiguration will block until "BACKUP DATABASE..."
     DWORD threadId;
-    HANDLE executeSqlThread = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)&executeSql, sql, 0, &threadId);
+    HANDLE executeSqlThread = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)&executeSql, (LPVOID)sql, 0, &threadId);
 
     // Ready...
     hr = virtualDeviceSet->GetConfiguration(30000, &vdConfig);
     if (FAILED(hr))
     {
-        err(L"\n%s: virtualDeviceSet->GetConfiguration failed: ", command);
+        err(L"\n%s: virtualDeviceSet->GetConfiguration failed "/*, command*/);
         if (hr == VD_E_TIMEOUT)
             err(L"Timed out waiting for backup to be initiated.\n");
         else
@@ -329,10 +331,157 @@ int mountAndTransferVirtualDevice(TCHAR *command, HRESULT &hr, TCHAR virtualDevi
     virtualDeviceSet->Release();
     return 0;
 }
+#pragma endregion
+
+#pragma region Расширяем CString c++ для iostream
+std::wostream& operator << (std::wostream& os, const CString& str)
+{
+	if (str.GetLength() > 0)  //GetLength???
+	{
+		os << CStringA(str).GetString();
+	}
+	return os;
+}
+std::ostream& operator << (std::ostream& os, const CString& str)
+{
+	if (str.GetLength() > 0)  //GetLength???
+	{
+		os << CStringA(str).GetString();
+	}
+	return os;
+}
+#pragma endregion
+
+#define ACTION_BACKUP  1
+#define ACTION_RESTORE 2
 
 // Entry point
 int _tmain(int argc, _TCHAR* argv[])
 {
+	#pragma region Тестирование CString
+	/*
+	CString aCString = CString(_T("A string"));
+	//log(aCString);
+	std::wcout << aCString.GetString() << std::endl;
+	std::wcout << aCString << std::endl;
+
+	CString tmpl = CString(_T("Replace ${var1} to ${var2}"));
+	tmpl.Replace(_T("${var1}"), _T("val 1"));
+	tmpl.Replace(_T("${var2}"), _T("val b"));
+	std::wcout << tmpl << std::endl;
+
+	CString tmpEnvVar = CString();
+	//tmpEnvVar.GetEnvironmentVariable(_T("TEMP"));
+	//std::wcout << L"TEMP=" << (tmpEnvVar) << std::endl;
+
+	system("PAUSE");
+
+	return 0;
+	*/
+	#pragma endregion
+
+	boolean sqlCommandSet = false;
+	CString sql = CString(_T(""));
+
+	int action = -1;
+
+	int parseState = 0;
+	for (int argi = 0; argi < argc; argi++)
+	{
+		CString arg = CString(argv[argi]);
+		switch (parseState) {
+		case 0:
+			if (arg == L"-sql") { parseState = 1; }
+			if (arg == L"-sqlenv") { parseState = 2; }
+			if (arg == L"backup") { action = ACTION_BACKUP; }
+			if (arg == L"restore") { action = ACTION_RESTORE; }
+			break;
+		case 1:
+			sql = CString(argv[argi]);
+			sqlCommandSet = true;
+			parseState = 0;
+			break;
+		case 2:
+			sql = CString();
+			sql.GetEnvironmentVariable(argv[argi]);
+			sqlCommandSet = true;
+			parseState = 0;
+			break;
+		}
+	}
+
+	if (!sqlCommandSet) {
+		wcerr << L"sql command not set, use command line arg: -sql sql_command" << endl;
+		return 1;
+	}
+
+	if (action <= 0) {
+		wcerr << L"action not set, use line arg: backup | restore" << endl;
+		return 1;
+	}
+
+	wcerr << L"passed sql command: " << sql << endl;
+
+	///////////////////////// INIT COM/ACTIVEX //////////////////////////////////
+	wcerr << L"init COM/ActiveX" << endl;
+
+	HRESULT hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+	if (FAILED(hr))
+	{
+		// Switching from apartment to multi-threaded is OK
+		if (hr != RPC_E_CHANGED_MODE)
+		{
+			err(L"CoInitializeEx failed: ", hr);
+			return 1;
+		}
+	}
+
+	if (action == ACTION_BACKUP) {
+		TCHAR virtualDeviceName[39];
+		GUID guid; CoCreateGuid(&guid);
+		StringFromGUID2(guid, virtualDeviceName, sizeof(virtualDeviceName));
+		wcerr << "created guid: " << virtualDeviceName << endl;
+
+		sql.Replace(_T("${guid}"), virtualDeviceName);
+		wcerr << "prepared sql: " << sql << endl;
+
+		FILE* backupFile = NULL;
+		backupFile = stdout;
+		wcerr << "target: " << "stdout" << endl;
+
+		const TCHAR* tsql;
+		LPCWSTR lpwstr = sql.GetString();
+		tsql = lpwstr;
+		hr = mountAndTransferVirtualDevice(hr, virtualDeviceName, tsql, backupFile);
+
+		return hr;
+	}
+
+	if (action == ACTION_RESTORE) {
+		TCHAR virtualDeviceName[39];
+		GUID guid; CoCreateGuid(&guid);
+		StringFromGUID2(guid, virtualDeviceName, sizeof(virtualDeviceName));
+		wcerr << "created guid: " << virtualDeviceName << endl;
+
+		sql.Replace(_T("${guid}"), virtualDeviceName);
+		wcerr << "prepared sql: " << sql << endl;
+
+		FILE* backupFile = NULL;
+		backupFile = stdin;
+		wcerr << "target: " << "stdin" << endl;
+
+		const TCHAR* tsql;
+		LPCWSTR lpwstr = sql.GetString();
+		tsql = lpwstr;
+		hr = mountAndTransferVirtualDevice(hr, virtualDeviceName, tsql, backupFile);
+
+		return hr;
+	}
+
+	wcerr << "undefined action" << endl;
+	return 1;
+
+	/****
 	if (argc < 3)
 	{
 		err(L"\n\
@@ -443,4 +592,5 @@ Options:\n\
 
 	//log(L"%s: Finished.\n", command);
 	return hr;
+	*/
 }
