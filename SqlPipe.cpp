@@ -8,12 +8,17 @@
 #include "vdi/vdi.h"        // interface declaration
 #include "vdi/vdierror.h"   // error constants
 #include "vdi/vdiguid.h"    // define the interface identifiers.
+#include "SqlPipe.h"
 
 using namespace std;
 
 // Globals
 TCHAR* _serverInstanceName;
 bool _optionQuiet = false;
+
+CString connectString = L"Provider=SQLOLEDB; Data Source=.; Initial Catalog=master; Integrated Security=SSPI;";
+CString connectLogin = L"";
+CString connectPassword = L"";
 
 // printf to stdout (if -q quiet option isn't specified)
 void log(const TCHAR* format, ...)
@@ -27,6 +32,7 @@ void log(const TCHAR* format, ...)
 	vfwprintf(stderr, format, arglist);
 }
 
+#pragma region output error messages
 // printf to stdout (regardless of -q quiet option)
 void err(const TCHAR* format, ...)
 {
@@ -48,8 +54,9 @@ _bstr_t errorMessage(DWORD messageId)
 	LocalFree(szMessage);
 	return retval;
 }
+#pragma endregion
 
-#pragma region ¬ыполнение SQL запроса
+#pragma region Execute SQL query
 // Execute the given SQL against _serverInstanceName
 DWORD executeSql(TCHAR* sql)
 {
@@ -76,14 +83,28 @@ DWORD executeSql(TCHAR* sql)
 
 	try
 	{
-		conn->ConnectionString = "Provider=SQLOLEDB; Data Source=" + serverName + "; Initial Catalog=master; Integrated Security=SSPI;";
+		//conn->ConnectionString = "Provider=SQLOLEDB; Data Source=" + serverName + "; Initial Catalog=master; Integrated Security=SSPI;";
 		//log(L"> Connect: %s\n", (TCHAR*)conn->ConnectionString);
+
+		conn->ConnectionString = connectString.GetString();
+		wcerr << "connect: " << connectString.GetString() << endl;
+
 		conn->ConnectionTimeout = 25;
-		conn->Open("", "", "", adConnectUnspecified);
+
+		long connectOpt = 0;
+		if (connectLogin.GetLength() < 1) {
+			connectOpt = adConnectUnspecified;
+			conn->Open("", "", "", connectOpt);
+		} else {
+			wcerr << "login: " << connectLogin.GetString() << endl;
+			conn->Open("", connectLogin.GetString(), connectPassword.GetString(), connectOpt);
+		}
+
+		//conn->Open("", "", "", connectOpt);
 	}
 	catch(_com_error e)
 	{
-		err(L"\nFailed to open connection to '" + serverName + L"': ");
+		err(L"\nFailed to open connection to database");
 		err(L"%s [%s]\n", (TCHAR*)e.Description(), (TCHAR*)e.Source());
 		return e.Error();
 	}
@@ -110,59 +131,6 @@ DWORD executeSql(TCHAR* sql)
 	return 0;
 }
 
-_RecordsetPtr executeRecordset(TCHAR* sql)
-{
-	HRESULT hr;
-	
-	_ConnectionPtr conn;
-	hr = conn.CreateInstance(__uuidof(Connection));
-	if (FAILED(hr))
-	{
-		err(L"ADODB.Connection CreateInstance failed: %s", (TCHAR*)errorMessage(hr));
-		return hr;
-	}
-
-	// "lpc:..." ensures shared memory...
-	_bstr_t serverName = "lpc:.";
-	if (_serverInstanceName != NULL)
-		serverName += "\\" + _bstr_t(_serverInstanceName);
-
-	try
-	{
-		conn->ConnectionString = "Provider=SQLOLEDB; Data Source=" + serverName + "; Initial Catalog=master; Integrated Security=SSPI;";
-		//log(L"> Connect: %s\n", (TCHAR*)conn->ConnectionString);
-		conn->ConnectionTimeout = 25;
-		conn->Open("", "", "", adConnectUnspecified);
-	}
-	catch(_com_error e)
-	{
-		err(L"\nFailed to open connection to '" + serverName + L"': ");
-		err(L"%s [%s]\n", (TCHAR*)e.Description(), (TCHAR*)e.Source());
-		return NULL;
-	}
-
-	try 
-	{	
-		//log(L"> SQL: %s\n", sql);
-		variant_t recordsAffected; 
-		conn->CommandTimeout = 0;
-		_RecordsetPtr recordset = conn->Execute(sql, &recordsAffected, adExecuteNoRecords);
-		conn->Close();
-        return recordset;
-	}
-	catch(_com_error e)
-	{
-		err(L"\nQuery failed: '%s'\n\n%s [%s]\n", sql, (TCHAR*)e.Description(), (TCHAR*)e.Source());
-		//err(L"  Errors:\n", conn->Errors->Count);
-		//for (int i = 0; i < conn->Errors->Count; i++)
-		//	err(L"  - %s\n\n", (TCHAR*)conn->Errors->Item[i]->Description);
-
-		conn->Close();
-        return NULL;
-	}
-
-	return NULL;
-}
 #pragma endregion
 
 #pragma region ћонтирование устройства и передача резервной копии
@@ -381,6 +349,8 @@ int _tmain(int argc, _TCHAR* argv[])
 	#pragma endregion
 
 	boolean sqlCommandSet = false;
+	boolean connStringSet = false;
+
 	CString sql = CString(_T(""));
 
 	int action = -1;
@@ -391,10 +361,16 @@ int _tmain(int argc, _TCHAR* argv[])
 		CString arg = CString(argv[argi]);
 		switch (parseState) {
 		case 0:
-			if (arg == L"-sql") { parseState = 1; }
-			if (arg == L"-sqlenv") { parseState = 2; }
-			if (arg == L"backup") { action = ACTION_BACKUP; }
-			if (arg == L"restore") { action = ACTION_RESTORE; }
+			if (arg == L"backup")   { action = ACTION_BACKUP; }
+			if (arg == L"restore")  { action = ACTION_RESTORE; }
+			if (arg == L"-sql"   )  { parseState = 1; }
+			if (arg == L"-sqlenv")  { parseState = 2; }
+			if (arg == L"-conn"  )  { parseState = 3; }
+			if (arg == L"-connenv") { parseState = 4; }
+			if (arg == L"-login")   { parseState = 5; }
+			if (arg == L"-loginenv"){ parseState = 6; }
+			if (arg == L"-passwd")  { parseState = 7; }
+			if (arg == L"-passwdenv") { parseState = 8; }
 			break;
 		case 1:
 			sql = CString(argv[argi]);
@@ -407,11 +383,45 @@ int _tmain(int argc, _TCHAR* argv[])
 			sqlCommandSet = true;
 			parseState = 0;
 			break;
+		case 3:
+			connectString = CString(argv[argi]);
+			parseState = 0;
+			connStringSet = true;
+			break;
+		case 4:
+			connectString = CString();
+			connectString.GetEnvironmentVariable(argv[argi]);
+			parseState = 0;
+			connStringSet = true;
+			break;
+		case 5:
+			connectLogin = CString(argv[argi]);
+			parseState = 0;
+			break;
+		case 6:
+			connectLogin = CString();
+			connectLogin.GetEnvironmentVariable(argv[argi]);
+			parseState = 0;
+			break;
+		case 7:
+			connectPassword = CString(argv[argi]);
+			parseState = 0;
+			break;
+		case 8:
+			connectPassword = CString();
+			connectPassword.GetEnvironmentVariable(argv[argi]);
+			parseState = 0;
+			break;
 		}
 	}
 
 	if (!sqlCommandSet) {
 		wcerr << L"sql command not set, use command line arg: -sql sql_command" << endl;
+		return 1;
+	}
+
+	if (!connStringSet) {
+		wcerr << L"sql connect string not set, use command line arg: -conn sql_connect_string" << endl;
 		return 1;
 	}
 
@@ -423,7 +433,7 @@ int _tmain(int argc, _TCHAR* argv[])
 	wcerr << L"passed sql command: " << sql << endl;
 
 	///////////////////////// INIT COM/ACTIVEX //////////////////////////////////
-	wcerr << L"init COM/ActiveX" << endl;
+	// wcerr << L"action: init COM/ActiveX" << endl;
 
 	HRESULT hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
 	if (FAILED(hr))
@@ -437,6 +447,8 @@ int _tmain(int argc, _TCHAR* argv[])
 	}
 
 	if (action == ACTION_BACKUP) {
+		wcerr << L"action: backup" << endl;
+
 		TCHAR virtualDeviceName[39];
 		GUID guid; CoCreateGuid(&guid);
 		StringFromGUID2(guid, virtualDeviceName, sizeof(virtualDeviceName));
@@ -458,6 +470,8 @@ int _tmain(int argc, _TCHAR* argv[])
 	}
 
 	if (action == ACTION_RESTORE) {
+		wcerr << L"action: restore" << endl;
+
 		TCHAR virtualDeviceName[39];
 		GUID guid; CoCreateGuid(&guid);
 		StringFromGUID2(guid, virtualDeviceName, sizeof(virtualDeviceName));
